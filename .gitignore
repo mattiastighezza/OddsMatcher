@@ -1,3 +1,5 @@
 debug_dumps/debug_dumps.zip
 debug_dumps/
 SureBetFinder-master.zip
+*.pyc
+*.json

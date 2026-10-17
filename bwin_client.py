@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Client API Diretto per Bwin IT.
-Usa il flag 'isMain' e il break immediato sul primo mercato 1X2 valido
-per garantire l'estrazione delle sole quote Esito Finale 1X2 reali.
+Ripristinato con il tuo codice originale funzionante (URL, ID Campionati e parametri),
+con l'aggiunta dell'estrazione del Betradar ID e il salvataggio in append.
 """
 
+import os
 import json
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
@@ -104,6 +105,22 @@ class BwinDirectClient:
             start_str = fix.get("startDate", "")
             odds_1x2 = {}
 
+            # --- ESTRAZIONE BETRADAR ID ---
+            betradar_id = None
+            cut_id = str(fix.get("id", ""))
+            if ":" in cut_id:
+                cand = cut_id.split(":")[-1].strip()
+                if cand.isdigit() and len(cand) >= 7:
+                    betradar_id = cand
+
+            if not betradar_id:
+                ext_refs = fix.get("externalReferences", [])
+                if isinstance(ext_refs, list):
+                    for ref in ext_refs:
+                        if isinstance(ref, dict) and str(ref.get("source", "")).lower() in ["betradar", "sportradar"]:
+                            betradar_id = str(ref.get("id", "")).strip()
+                            break
+
             # Priorità 1: cerca il mercato principale contrassegnato da isMain == True
             main_markets = [m for m in opt_mkts if isinstance(m, dict) and m.get("isMain") is True]
             candidate_markets = main_markets if main_markets else opt_mkts
@@ -152,10 +169,40 @@ class BwinDirectClient:
                     "home_team": home,
                     "away_team": away,
                     "kickoff": start_str,
+                    "betradar_id": betradar_id,  # <-- Aggiunto al dizionario
                     "markets": {"1X2": odds_1x2}
                 })
 
         return parsed
+
+
+def merge_and_save(bookmaker_name: str, new_events: List[Dict[str, Any]]):
+    existing_events = []
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                existing_events = [
+                    ev for ev in data.get("events", [])
+                    if ev.get("bookmaker") != bookmaker_name
+                ]
+        except Exception:
+            existing_events = []
+
+    combined = existing_events + new_events
+    payload = {
+        "acquired_at": datetime.now(timezone.utc).isoformat(),
+        "total_events": len(combined),
+        "events": combined
+    }
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    print("\n" + "=" * 65)
+    print(f"[+] COMPLETATO: {len(new_events)} partite {bookmaker_name} salvate in: {OUTPUT_FILE}")
+    print(f"[+] Totale complessivo eventi nel file: {len(combined)}")
+    print("=" * 65)
 
 
 def main():
@@ -167,25 +214,15 @@ def main():
         print("[!] Nessun evento estratto.")
         return
 
-    payload = {
-        "acquired_at": datetime.now(timezone.utc).isoformat(),
-        "total_events": len(events),
-        "events": events
-    }
-
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-
-    print("\n" + "=" * 65)
-    print(f"[+] COMPLETATO: {len(events)} partite Bwin salvate in: {OUTPUT_FILE}")
-    print("=" * 65)
+    merge_and_save("Bwin", events)
 
     # Stampa di controllo sulle prime partite di Serie A e Serie B
     print("\n[VERIFICA QUOTE ESTRATTE]:")
     for ev in events:
         if ev["competition"] in ["Serie A (IT)", "Serie B (IT)"]:
             q = ev["markets"]["1X2"]
-            print(f"  • [{ev['competition']}] {ev['home_team']} vs {ev['away_team']} -> 1: {q['1']:.2f} | X: {q['X']:.2f} | 2: {q['2']:.2f}")
+            br_id = ev.get("betradar_id", "N/A")
+            print(f"  • [{ev['competition']}] {ev['home_team']} vs {ev['away_team']} (ID: {br_id}) -> 1: {q['1']:.2f} | X: {q['X']:.2f} | 2: {q['2']:.2f}")
 
 
 if __name__ == "__main__":
