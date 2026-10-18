@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Client API Diretto per William Hill IT (XSportDatastore).
-Nessun browser richiesto: interroga l'endpoint JSON getTorneoCentrale
-e aggiorna 'bookmakers_data.json'.
+Utilizza l'endpoint universale getEventiPrematchDettaglioTorneo per
+scaricare senza errori 404 sia i campionati italiani che quelli esteri.
 """
 
 import os
@@ -14,9 +14,15 @@ from curl_cffi import requests
 OUTPUT_FILE = "bookmakers_data.json"
 BASE_URL = "https://sports.williamhill.it/XSportDatastore"
 
-# Parametri verificati dal dump per la Serie A (sportId=1, categoryId=31, tournamentId=33, idAggregata=319)
 DEFAULT_WH_LEAGUES = {
-    "Serie A (IT)": {"categoryId": 31, "tournamentId": 33, "idAggregata": 319}
+    "Serie A (IT)": {"categoryId": 31, "tournamentId": 33},
+    "Serie B (IT)": {"categoryId": 31, "tournamentId": 34},
+    "Premier League (UK)": {"categoryId": 322, "tournamentId": 197},
+    "La Liga (ES)": {"categoryId": 324, "tournamentId": 341},
+    "Bundesliga (DE)": {"categoryId": 321, "tournamentId": 260},
+    "Ligue 1 (FR)": {"categoryId": 323, "tournamentId": 220},
+    "Champions League": {"categoryId": 338, "tournamentId": 242},
+    "Europa League": {"categoryId": 338, "tournamentId": 243}
 }
 
 
@@ -30,10 +36,6 @@ class WilliamHillDirectClient:
         }
 
     def discover_leagues(self) -> Dict[str, Dict[str, int]]:
-        """
-        Estrae dinamicamente categoryId, tournamentId e idAggregata
-        dal dump locale 08_getMenuPrematch.json o dall'endpoint live.
-        """
         leagues = dict(DEFAULT_WH_LEAGUES)
         menu_data = None
 
@@ -57,33 +59,32 @@ class WilliamHillDirectClient:
         if not menu_data:
             return leagues
 
-        # Ricerca ricorsiva dei tornei nel menu di William Hill
         def walk_menu(node, cat_id=None, cat_name=""):
             if isinstance(node, dict):
-                # Identifica se è una categoria/nazione o un torneo
                 c_id = node.get("ic", node.get("categoryId", cat_id))
                 t_id = node.get("it", node.get("tournamentId"))
-                agg_id = node.get("oa", node.get("idAggregata", 319))
 
                 dsl = node.get("dsl", {})
                 name = str(dsl.get("IT", node.get("d", node.get("name", "")))).lower().strip() if isinstance(dsl, dict) else ""
                 seo = str(node.get("seo", "")).lower()
 
                 if c_id and t_id and (name or seo):
+                    entry = {"categoryId": int(c_id), "tournamentId": int(t_id)}
+                    
                     if ("italia/serie-b" in seo or (name == "serie b" and "ital" in cat_name)) and "Serie B (IT)" not in leagues:
-                        leagues["Serie B (IT)"] = {"categoryId": int(c_id), "tournamentId": int(t_id), "idAggregata": int(agg_id or 319)}
+                        leagues["Serie B (IT)"] = entry
                     elif ("premier-league" in seo or (name == "premier league" and "inghil" in cat_name)) and "Premier League (UK)" not in leagues:
-                        leagues["Premier League (UK)"] = {"categoryId": int(c_id), "tournamentId": int(t_id), "idAggregata": int(agg_id or 319)}
+                        leagues["Premier League (UK)"] = entry
                     elif ("spagna/la-liga" in seo or "spagna/liga" in seo or (name in ["la liga", "liga"] and "spagn" in cat_name)) and "La Liga (ES)" not in leagues:
-                        leagues["La Liga (ES)"] = {"categoryId": int(c_id), "tournamentId": int(t_id), "idAggregata": int(agg_id or 319)}
+                        leagues["La Liga (ES)"] = entry
                     elif ("germania/bundesliga" in seo or (name == "bundesliga" and "german" in cat_name)) and "Bundesliga (DE)" not in leagues:
-                        leagues["Bundesliga (DE)"] = {"categoryId": int(c_id), "tournamentId": int(t_id), "idAggregata": int(agg_id or 319)}
+                        leagues["Bundesliga (DE)"] = entry
                     elif ("francia/ligue-1" in seo or (name == "ligue 1" and "franc" in cat_name)) and "Ligue 1 (FR)" not in leagues:
-                        leagues["Ligue 1 (FR)"] = {"categoryId": int(c_id), "tournamentId": int(t_id), "idAggregata": int(agg_id or 319)}
+                        leagues["Ligue 1 (FR)"] = entry
                     elif ("champions-league" in seo or "champions league" in name) and "Champions League" not in leagues:
-                        leagues["Champions League"] = {"categoryId": int(c_id), "tournamentId": int(t_id), "idAggregata": int(agg_id or 319)}
+                        leagues["Champions League"] = entry
                     elif ("europa-league" in seo or "europa league" in name) and "Europa League" not in leagues:
-                        leagues["Europa League"] = {"categoryId": int(c_id), "tournamentId": int(t_id), "idAggregata": int(agg_id or 319)}
+                        leagues["Europa League"] = entry
 
                 next_cat_name = name if (c_id and not t_id and name) else cat_name
                 for v in node.values():
@@ -98,15 +99,15 @@ class WilliamHillDirectClient:
         return leagues
 
     def fetch_league(self, league_name: str, cfg: Dict[str, int]) -> List[Dict[str, Any]]:
-        url = f"{BASE_URL}/getTorneoCentrale"
+        # Endpoint universale per le liste dei match
+        url = f"{BASE_URL}/getEventiPrematchDettaglioTorneo"
         params = {
             "systemCode": "WILLIAMHILL",
             "lingua": "IT",
             "hash": "",
             "sportId": "1",
             "categoryId": str(cfg["categoryId"]),
-            "tournamentId": str(cfg["tournamentId"]),
-            "idAggregata": str(cfg.get("idAggregata", 319))
+            "tournamentId": str(cfg["tournamentId"])
         }
 
         try:
@@ -116,7 +117,7 @@ class WilliamHillDirectClient:
                 return []
             return self._parse_payload(res.json(), league_name)
         except Exception as e:
-            print(f"[!] Errore William Hill su {league_name}: {e}")
+            print(f"[!] Errore parsing William Hill su {league_name}: {e}")
             return []
 
     def _parse_payload(self, data: Dict[str, Any], league_name: str) -> List[Dict[str, Any]]:
@@ -128,7 +129,6 @@ class WilliamHillDirectClient:
         for av in avs:
             if not isinstance(av, dict):
                 continue
-            # Esclude eventi live (lv=True) e antepost (ant=True)
             if av.get("lv") is True or av.get("ant") is True:
                 continue
 
@@ -140,11 +140,15 @@ class WilliamHillDirectClient:
             home, away = [s.strip() for s in match_title.split(" - ", 1)]
             kickoff = str(av.get("ts", ""))
 
+            betradar_id = None
+            raw_br = av.get("bri") or av.get("idEventoSportradar") or av.get("eventId")
+            if raw_br:
+                betradar_id = str(raw_br).strip()
+
             odds_1x2 = {}
             for sc in av.get("scs", []):
                 if not isinstance(sc, dict):
                     continue
-                # Mercato 1X2 principale: cs == 3 e h == 0 (nessun handicap)
                 if sc.get("cs") == 3 and sc.get("h", 0) == 0:
                     for eq in sc.get("eqs", []):
                         if not isinstance(eq, dict):
@@ -169,6 +173,7 @@ class WilliamHillDirectClient:
                     "home_team": home,
                     "away_team": away,
                     "kickoff": kickoff,
+                    "betradar_id": betradar_id,
                     "markets": {"1X2": odds_1x2}
                 })
 
@@ -221,6 +226,7 @@ if __name__ == "__main__":
     if extracted:
         merge_and_save("William Hill", extracted)
         s = extracted[0]
-        print(f"\nEsempio William Hill: {s['home_team']} vs {s['away_team']} -> {s['markets']['1X2']}")
+        br_str = f" (ID: {s.get('betradar_id')})" if s.get('betradar_id') else ""
+        print(f"\nEsempio William Hill: {s['home_team']} vs {s['away_team']}{br_str} -> {s['markets']['1X2']}")
     else:
         print("[!] Nessun evento estratto da William Hill.")
