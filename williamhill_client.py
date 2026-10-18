@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """
-Client API diretto per William Hill IT (XSportDatastore) - quote 1X2 + Betradar ID.
-
-Cosa non funzionava (verificato sul HAR):
-- L'endpoint getEventiPrematchDettaglioTorneo NON esiste -> 404. Il sito usa
-  getTorneoCentrale (con idAggregata = campo "ba" del torneo nel menu, di norma 319).
-- Gli ID in DEFAULT_WH_LEAGUES erano sbagliati (tranne Serie A). Quelli veri vengono letti
-  dal menu getMenuPrematch (categoria -> tornei) e, se il menu non risponde, da un fallback.
-- La discovery cercava le chiavi "ic"/"it" (nel menu "ic" e' un'icona e il torneo ha "id"/"idc")
-  e leggeva un file di debug locale: non poteva mai funzionare.
-- Betradar ID: e' il campo "bid" dell'evento (coincide al 100% con addons.betRadar di Bwin
-  sulle partite in comune); "bri"/"idEventoSportradar" non esistono.
-- "ts" e' ora italiana ("20261019 18:30:00"): ora viene convertito in UTC ISO, come Bwin.
-- Serie B: nel menu di William Hill IT non e' presente. Viene segnalato, non interrogato a vuoto.
+Client API diretto per William Hill IT (XSportDatastore).
+Quote estratte:
+- 1X2 (Esito Finale)
+- Under/Over (1.5, 2.5, 3.5, 4.5)
+- Goal/No Goal (GG/NG)
+- Doppia Chance (1X, X2, 12)
+- Betradar ID (bid)
+- Kickoff normalizzato in UTC ISO
 """
 
 import os
@@ -26,10 +21,10 @@ from curl_cffi import requests
 OUTPUT_FILE = "bookmakers_data.json"
 BASE_URL = "https://sports.williamhill.it/XSportDatastore"
 SPORT_ID_FOOTBALL = 1
-DEFAULT_AGGREGATE = 319        # idAggregata usato dal sito per i tornei con quote complete
+DEFAULT_AGGREGATE = 319
 RETRIES = 3
 
-# Etichetta -> slug (ultimo pezzo del percorso SEO nel menu, ammessi piu' alias)
+# Etichetta -> slug SEO nel menu
 WH_LEAGUE_SLUGS: Dict[str, List[str]] = {
     "Serie A (IT)":        ["calcio/italia/serie-a"],
     "Serie B (IT)":        ["calcio/italia/serie-b"],
@@ -41,8 +36,7 @@ WH_LEAGUE_SLUGS: Dict[str, List[str]] = {
     "Europa League":       ["calcio/coppe-europee/uefa-europa-league"],
 }
 
-# Fallback se il menu non e' raggiungibile (ID letti dal menu reale nel HAR).
-# Serie B volutamente assente: non e' offerta.
+# Fallback se il menu live non risponde
 FALLBACK_LEAGUES: Dict[str, Dict[str, int]] = {
     "Serie A (IT)":        {"categoryId": 31, "tournamentId": 33,  "aggregate": 319},
     "Premier League (UK)": {"categoryId": 1,  "tournamentId": 1,   "aggregate": 319},
@@ -62,19 +56,18 @@ def _last_sunday(year: int, month: int) -> datetime:
 
 
 def rome_ts_to_utc_iso(ts: str) -> str:
-    """'20261019 18:30:00' (ora italiana) -> '2026-10-19T16:30:00Z'. Senza dipendenze da tzdata."""
+    """'20261019 18:30:00' (ora italiana) -> '2026-10-19T16:30:00Z'."""
     try:
         local = datetime.strptime(ts.strip(), "%Y%m%d %H:%M:%S")
     except Exception:
         return ts
-    dst_start = _last_sunday(local.year, 3).replace(hour=2)    # 02:00 locali
-    dst_end = _last_sunday(local.year, 10).replace(hour=3)     # 03:00 locali
+    dst_start = _last_sunday(local.year, 3).replace(hour=2)
+    dst_end = _last_sunday(local.year, 10).replace(hour=3)
     offset = 2 if dst_start <= local < dst_end else 1
     return (local - timedelta(hours=offset)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _seo_paths(node: Dict) -> List[str]:
-    """Estrae tutti i percorsi SEO di un nodo del menu (il campo e' una stringa JSON)."""
     raw = node.get("seo")
     try:
         data = json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -113,7 +106,6 @@ class WilliamHillDirectClient:
             time.sleep(1.5 * attempt)
         return None
 
-    # -- discovery ------------------------------------------------------------
     def discover_leagues(self) -> Dict[str, Dict[str, int]]:
         menu = self._get_json("getMenuPrematch",
                               {"systemCode": "WILLIAMHILL", "lingua": "IT", "hash": ""}, "menu")
@@ -126,7 +118,6 @@ class WilliamHillDirectClient:
             print("[!] Calcio non trovato nel menu: uso gli ID di fallback")
             return dict(FALLBACK_LEAGUES)
 
-        # indice slug -> torneo
         by_slug: Dict[str, Dict[str, int]] = {}
         for cat in football.get("cts", []):
             for t in cat.get("tns", []):
@@ -136,7 +127,7 @@ class WilliamHillDirectClient:
                     "aggregate": int(t.get("ba") or DEFAULT_AGGREGATE),
                 }
                 for p in _seo_paths(t):
-                    by_slug[p.split("it-it/")[-1]] = entry     # normalizza '/betting/it-it/calcio/...'
+                    by_slug[p.split("it-it/")[-1]] = entry
 
         leagues: Dict[str, Dict[str, int]] = {}
         for label, slugs in WH_LEAGUE_SLUGS.items():
@@ -150,9 +141,7 @@ class WilliamHillDirectClient:
                 print(f"[-] {label}: non offerta da William Hill (assente dal menu), salto")
         return leagues
 
-    # -- download -------------------------------------------------------------
     def fetch_league(self, league_name: str, cfg: Dict[str, int]) -> Optional[List[Dict[str, Any]]]:
-        """None = download fallito (distinto da [] = nessuna partita)."""
         params = {
             "systemCode": "WILLIAMHILL",
             "lingua": "IT",
@@ -181,7 +170,6 @@ class WilliamHillDirectClient:
             all_events.extend(evs)
         return all_events, failed
 
-    # -- parsing --------------------------------------------------------------
     def _parse_payload(self, data: Dict[str, Any], league_name: str) -> List[Dict[str, Any]]:
         events, seen = [], set()
         avs = data.get("avs", []) if isinstance(data, dict) else []
@@ -191,7 +179,7 @@ class WilliamHillDirectClient:
         for av in avs:
             if not isinstance(av, dict):
                 continue
-            if av.get("lv") is True or av.get("ant") is True:     # live / antepost
+            if av.get("lv") is True or av.get("ant") is True:  # Salta live e antepost
                 continue
 
             dsl = av.get("dsl") or {}
@@ -200,8 +188,9 @@ class WilliamHillDirectClient:
                 continue
             home, away = [s.strip() for s in title.split(" - ", 1)]
 
-            odds = self._extract_1x2(av)
-            if not odds:
+            # Estrazione di tutti i mercati disponibili (1X2, U/O, GG/NG, DC)
+            markets = self._extract_all_markets(av)
+            if not markets.get("1X2"):
                 continue
 
             bid = av.get("bid")
@@ -219,33 +208,93 @@ class WilliamHillDirectClient:
                 "away_team": away,
                 "kickoff": rome_ts_to_utc_iso(str(av.get("ts", ""))),
                 "betradar_id": betradar_id,
-                "markets": {"1X2": odds},
+                "markets": markets,
             })
         return events
 
-    @staticmethod
-    def _extract_1x2(av: Dict[str, Any]) -> Optional[Dict[str, float]]:
-        """Mercato 1X2 tempo regolamentare: cs == 3, senza handicap (h == 0), quote in centesimi."""
+    @classmethod
+    def _extract_all_markets(cls, av: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+        """
+        Estrae:
+        - 1X2 ('1X2'): {'1': ..., 'X': ..., '2': ...}
+        - Under/Over ('OVER_UNDER_15', 'OVER_UNDER_25', 'OVER_UNDER_35', 'OVER_UNDER_45'):
+            {'Under': ..., 'Over': ...}
+        - Goal / No Goal ('GOAL_NOGOAL'): {'Goal': ..., 'NoGoal': ...}
+        - Doppia Chance ('DOUBLE_CHANCE'): {'1X': ..., 'X2': ..., '12': ...}
+        """
+        markets: Dict[str, Dict[str, float]] = {}
+        double_chance: Dict[str, float] = {}
+
         for sc in av.get("scs", []):
-            if not isinstance(sc, dict) or sc.get("cs") != 3 or sc.get("h", 0) != 0:
+            if not isinstance(sc, dict):
                 continue
+            cs = sc.get("cs")
+            h = sc.get("h", 0)
             eqs = sc.get("eqs", [])
-            if len(eqs) != 3:
-                continue
-            odds: Dict[str, float] = {}
-            for eq in eqs:
-                q = eq.get("q", 0) if isinstance(eq, dict) else 0
-                if not isinstance(q, (int, float)) or q <= 100:   # 0 / 1.00 = sospesa
-                    return None
-                key = {1: "1", 2: "X", 3: "2"}.get(eq.get("ce"))
-                if key:
-                    odds[key] = q / 100.0
-            if len(odds) == 3:
-                return odds
-        return None
+
+            # 1. ESITO FINALE 1X2 (cs=3, h=0)
+            if cs == 3 and h == 0 and len(eqs) == 3:
+                odds_1x2: Dict[str, float] = {}
+                for eq in eqs:
+                    q = eq.get("q", 0) if isinstance(eq, dict) else 0
+                    if not isinstance(q, (int, float)) or q <= 100:
+                        odds_1x2 = {}
+                        break
+                    key = {1: "1", 2: "X", 3: "2"}.get(eq.get("ce"))
+                    if key:
+                        odds_1x2[key] = q / 100.0
+                if len(odds_1x2) == 3:
+                    markets["1X2"] = odds_1x2
+
+            # 2. UNDER / OVER (cs=7989, h in [150, 250, 350, 450])
+            elif cs == 7989 and h in (150, 250, 350, 450) and len(eqs) == 2:
+                line_map = {150: "OVER_UNDER_15", 250: "OVER_UNDER_25", 350: "OVER_UNDER_35", 450: "OVER_UNDER_45"}
+                mkt_key = line_map[h]
+                uo_odds: Dict[str, float] = {}
+                for eq in eqs:
+                    q = eq.get("q", 0) if isinstance(eq, dict) else 0
+                    if not isinstance(q, (int, float)) or q <= 100:
+                        uo_odds = {}
+                        break
+                    # ce=1 -> Under, ce=2 -> Over
+                    key = {1: "Under", 2: "Over"}.get(eq.get("ce"))
+                    if key:
+                        uo_odds[key] = q / 100.0
+                if len(uo_odds) == 2:
+                    markets[mkt_key] = uo_odds
+
+            # 3. GOAL / NO GOAL (cs=18, h=0)
+            elif cs == 18 and h == 0 and len(eqs) == 2:
+                gg_odds: Dict[str, float] = {}
+                for eq in eqs:
+                    q = eq.get("q", 0) if isinstance(eq, dict) else 0
+                    if not isinstance(q, (int, float)) or q <= 100:
+                        gg_odds = {}
+                        break
+                    # ce=1 -> Goal (GG), ce=2 -> No Goal (NG)
+                    key = {1: "Goal", 2: "NoGoal"}.get(eq.get("ce"))
+                    if key:
+                        gg_odds[key] = q / 100.0
+                if len(gg_odds) == 2:
+                    markets["GOAL_NOGOAL"] = gg_odds
+
+            # 4. DOPPIA CHANCE (cs=15 per 1X, cs=16 per X2, cs=17 per 12)
+            elif cs in (15, 16, 17) and h == 0 and eqs:
+                eq = eqs[0] if isinstance(eqs, list) else None
+                if isinstance(eq, dict):
+                    q = eq.get("q", 0)
+                    if isinstance(q, (int, float)) and q > 100:
+                        label = {15: "1X", 16: "X2", 17: "12"}.get(cs)
+                        if label:
+                            double_chance[label] = q / 100.0
+
+        if len(double_chance) == 3:
+            markets["DOUBLE_CHANCE"] = double_chance
+
+        return markets
 
 
-# ----------------------------------------------------------------------------- salvataggio
+# ----------------------------------------------------------------------------- salvataggio atomico
 def merge_and_save(bookmaker_name: str, new_events: List[Dict[str, Any]], failed_competitions: List[str]):
     existing_events: List[Dict[str, Any]] = []
     if os.path.exists(OUTPUT_FILE):
@@ -256,7 +305,7 @@ def merge_and_save(bookmaker_name: str, new_events: List[Dict[str, Any]], failed
                 if ev.get("bookmaker") != bookmaker_name:
                     existing_events.append(ev)
                 elif ev.get("competition") in failed_competitions:
-                    existing_events.append(ev)          # download fallito: tengo i dati precedenti
+                    existing_events.append(ev)
         except Exception as e:
             print(f"[!] File esistente illeggibile ({e}): lo ricreo da zero.")
             existing_events = []
@@ -293,7 +342,10 @@ if __name__ == "__main__":
         merge_and_save("William Hill", extracted, failed)
         if extracted:
             s = extracted[0]
-            print(f"\nEsempio William Hill: {s['home_team']} vs {s['away_team']} "
-                  f"(Betradar: {s.get('betradar_id') or 'N/A'}, {s['kickoff']}) -> {s['markets']['1X2']}")
+            print(f"\nEsempio William Hill: {s['home_team']} vs {s['away_team']} (Betradar: {s.get('betradar_id') or 'N/A'})")
+            print(f"  • 1X2:             {s['markets'].get('1X2')}")
+            print(f"  • Under/Over 2.5:  {s['markets'].get('OVER_UNDER_25')}")
+            print(f"  • Goal/No Goal:    {s['markets'].get('GOAL_NOGOAL')}")
+            print(f"  • Doppia Chance:   {s['markets'].get('DOUBLE_CHANCE')}")
     else:
         print("[!] Nessun evento estratto da William Hill.")
